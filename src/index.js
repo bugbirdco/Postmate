@@ -1,3 +1,443 @@
-import { Postmate } from '../src/postmate'
+/**
+ * The type of messages our frames our sending
+ * @type {String}
+ */
+const messageType = 'application/x-postmate-v1+json'
 
-export default Postmate
+/**
+ * The maximum number of attempts to send a handshake request to the parent
+ * @type {Number}
+ */
+const handshakeRequestsCount = 5
+
+/**
+ * The amount of time between handshake sends
+ * @type {Number}
+ */
+const handshakeCoolDown = 500
+
+/**
+ * The amount of time between handshake sends
+ * @type {Number}
+ */
+const responseTimeout = 1500
+
+/**
+ * A unique ID that is used to ensure responses are sent to the correct requests
+ * @type {Number}
+ */
+let id = 0
+
+/**
+ * Increments and returns an ID
+ * @return {Number} A unique ID for a message
+ */
+const nextId = () => ++id
+
+/**
+ * A unique message ID that is used to ensure responses are sent to the correct requests
+ * @type {Number}
+ */
+let requestId = 0
+
+/**
+ * Increments and returns a message ID
+ * @return {Number} A unique ID for a message
+ */
+const nextRequestId = () => ++requestId
+
+/**
+ * Postmate logging function that enables/disables via config
+ * @param  {Object} ...args Rest Arguments
+ */
+const log = (...args) => Postmate.debug && process.env.NODE_ENV !== 'production' ? console.log(...args) : null // eslint-disable-line no-console
+
+/**
+ * Takes a URL and returns the origin
+ * @param  {String} url The full URL being requested
+ * @return {String}     The URLs origin
+ */
+const resolveOrigin = (url) => {
+    const a = document.createElement('a')
+    a.href = url
+    const protocol = a.protocol.length > 4 ? a.protocol : window.location.protocol
+    const host = a.host.length ? ((a.port === '80' || a.port === '443') ? a.hostname : a.host) : window.location.host
+    return a.origin || `${protocol}//${host}`
+}
+
+const proxy = async function (key, spec, ...args) {
+    if (spec[key] > 0 && args.length < spec[key])
+        throw Error(`Method ${key} expects there to be at least ${spec} arguments`)
+    return await this.emit(key, args)
+}
+
+export class Model {
+    _getCapabilities() {
+        return Object.getOwnPropertyNames(Object.getPrototypeOf(this))
+            // Get only the public methods
+            .filter((attribute) => {
+                switch (true) {
+                    case attribute === 'constructor':
+                    case attribute.substr(0, 1) === '_':
+                    case typeof this[attribute] !== 'function':
+                        return false
+                }
+                return true
+            })
+            // Return a spec containing the name & args length
+            .reduce((spec, key) => {
+                spec[key] = this[key].length;
+                return spec;
+            }, {})
+    }
+}
+
+class Config {
+    frame
+    actor
+
+    constructor(config) {
+        this.frame = config.frame
+        this.actor = config.actor
+    }
+}
+
+class API {
+    id
+    origin
+    outbound
+    inbound
+
+    /**
+     * @param {String} id
+     * @param {String} origin
+     * @param {Config} outbound
+     * @param {Config} inbound
+     */
+    constructor(id, origin, outbound, inbound) {
+        this.id = id
+        this.origin = origin
+        this.outbound = outbound
+        this.inbound = inbound
+
+        log('Registering API')
+        for (let key of Object.keys(this.outbound.actor)) {
+            this[key] = proxy.bind(this, key, this.outbound.actor)
+        }
+
+        log('Awaiting messages...')
+
+        this.inbound.frame.addEventListener('message', ({data, origin}) => {
+
+            log('Received request', data)
+
+            let processable = !!data.postmate
+                && data.type === messageType
+                && origin === this.origin
+                && data.id === this.id
+                && data.postmate in this.inbound.actor
+
+            if (processable) {
+                Promise
+                    .resolve(this.inbound.actor[data.postmate](...data.payload))
+                    .then((val) => {
+                        this.outbound.frame.postMessage({
+                            postmate: '_response',
+                            id: this.id,
+                            requestId: data.requestId,
+                            payload: [val],
+                            type: messageType
+                        }, this.origin)
+                    })
+            }
+        })
+
+        log('Awaiting event emissions from Child')
+    }
+
+    emit(name, args) {
+        return new Promise((resolve, reject) => {
+            log(`Emitting Event "${name}"`, args)
+            let requestId = nextRequestId()
+
+            let watchdog;
+            let responseListener = (e) => {
+                let processable = e.data.postmate === '_response'
+                    && e.data.type === messageType
+                    && e.origin === this.origin
+                    && e.data.id === this.id
+                    && e.data.requestId === requestId
+
+                if (processable) {
+                    clearTimeout(watchdog)
+                    this.inbound.frame.removeEventListener('message', responseListener)
+                    resolve(e.data.payload[0])
+                }
+            }
+
+            watchdog = setTimeout(() => {
+                this.inbound.frame.removeEventListener('message', responseListener)
+                reject('Timed out before a response returned')
+            }, responseTimeout)
+
+            this.inbound.frame.addEventListener('message', responseListener)
+
+            this.outbound.frame.postMessage({
+                postmate: name,
+                id: this.id,
+                payload: args,
+                requestId,
+                type: messageType,
+            }, this.origin)
+        })
+    }
+}
+
+/**
+ * Composes an API to be used by the parent
+ * @param {Object} info Information on the consumer
+ */
+class ParentAPI extends API {
+    constructor(id, origin, outboundSpec, inboundModel) {
+        super(
+            id,
+            origin,
+            new Config({
+                frame: window.opener || window.parent,
+                actor: outboundSpec,
+            }),
+            new Config({
+                frame: window,
+                actor: inboundModel,
+            }),
+        );
+    }
+}
+
+/**
+ * Composes an API to be used by the child
+ */
+class ChildAPI extends API {
+    constructor(id, origin, outboundFrame, outboundSpec, inboundModel) {
+        super(
+            id,
+            origin,
+            new Config({
+                frame: outboundFrame,
+                actor: outboundSpec,
+            }),
+            new Config({
+                frame: window,
+                actor: inboundModel,
+            }),
+        );
+    }
+}
+
+/**
+ * The entry point of the Parent.
+ * @type {Class}
+ */
+class Parent {
+    /**
+     *
+     * @param {String} url
+     * @param {String} name
+     * @param {Model} model
+     * @param {string} options
+     * @returns {Postmate}
+     */
+    static window(url, name, model = null, options = null) {
+        let frame = window.open(url, name, options)
+        return new Parent(model, url, frame, frame)
+    }
+
+    /**
+     * @param {String} url
+     * @param {String} name
+     * @param {Model} model
+     * @param {Function} options
+     * @param {HTMLElement} container
+     * @returns {Postmate}
+     */
+    static iframe(url, name, model = null, options = null, container = document.body) {
+        let frame = document.createElement('iframe')
+        if (options) options(frame)
+        frame.name = name
+        container.appendChild(frame)
+        return new Parent(model, url, frame, frame.contentWindow || frame.contentDocument.parentWindow)
+    }
+
+    parent
+    frame
+    child
+    model
+
+    /**
+     * Sets options related to the Parent
+     * @param {Model} model
+     * @param {String} url
+     * @param {Object} frame
+     * @param {Object} child
+     * @return {Promise}
+     */
+    constructor(model, url, frame, child) {
+        this.parent = window
+        this.frame = frame
+        this.child = child
+        this.model = model
+
+        return this.sendHandshake(url)
+    }
+
+    /**
+     * Begins the handshake strategy
+     * @param  {String} url The URL to send a handshake request to
+     * @return {Promise}     Promise that resolves when the handshake is complete
+     */
+    sendHandshake(url) {
+        return new Promise((resolve, reject) => {
+            const childOrigin = resolveOrigin(url)
+            let attempt = 0
+            let responseInterval
+            let id = nextId()
+
+            const reply = (e) => {
+                if (e.data.postmate === '_handshake' && e.data.id === id && e.origin === childOrigin) {
+                    clearInterval(responseInterval)
+
+                    log('Received handshake reply from Child')
+                    this.parent.removeEventListener('message', reply, false)
+
+                    return resolve(new ChildAPI(id, e.origin, this.child, e.data.payload[0], this.model))
+                }
+
+                // Might need to remove since parent might be receiving different messages
+                // from different hosts
+                log('Invalid handshake reply')
+                return reject('Failed handshake')
+            }
+
+            this.parent.addEventListener('message', reply, false)
+
+            const doSend = () => {
+                attempt++
+                log(`Sending handshake attempt ${attempt}`, {childOrigin})
+
+                try {
+                    this.child.postMessage({
+                        postmate: '_handshake',
+                        id,
+                        payload: [
+                            this.model._getCapabilities()
+                        ],
+                        type: messageType,
+                    }, childOrigin)
+                } finally {
+                    if (attempt >= handshakeRequestsCount) {
+                        clearInterval(responseInterval)
+                    }
+                }
+            }
+
+            const loaded = () => {
+                responseInterval = setInterval(doSend, 500)
+            }
+
+            if (this.frame.attachEvent) {
+                this.frame.attachEvent('onload', loaded)
+            } else {
+                this.frame.addEventListener('load', loaded)
+            }
+
+            log('Loading frame', {url})
+            if (!this.frame.src) {
+                this.frame.src = url
+            }
+        })
+    }
+
+    async focus() {
+        this.child.focus();
+    }
+
+    async end() {
+        await this.then(async (parent) => {
+            await parent.emit('_close', ['closing'])
+        })
+    }
+}
+
+/**
+ * The entry point of the Child
+ * @type {Class}
+ */
+export class Child {
+    child
+    parent
+    model
+    id
+
+    /**
+     * Initializes the child, model, parent, and responds to the Parents handshake
+     * @param {Model} model Hash of values, functions, or promises
+     * @return {Promise} The Promise that resolves when the handshake has been received
+     */
+    constructor(model) {
+        this.child = window
+        this.parent = this.child.parent || this.child.opener
+        this.model = model
+        return this.sendHandshakeReply()
+    }
+
+    /**
+     * Responds to a handshake initiated by the Parent
+     * @return {Promise} Resolves an object that exposes an API for the Child
+     */
+    sendHandshakeReply() {
+        return new Promise((resolve, reject) => {
+            const watchdog = setTimeout(() => {
+                this.child.removeEventListener('message', shake, false)
+                reject('Handshake never received')
+            }, handshakeCoolDown * handshakeRequestsCount)
+            const shake = (e) => {
+                if (e.data.postmate === '_handshake') {
+                    log('Received handshake from Parent')
+                    clearTimeout(watchdog)
+                    this.child.removeEventListener('message', shake, false)
+
+                    log('Sending handshake reply to Parent')
+                    e.source.postMessage({
+                        postmate: '_handshake',
+                        id: e.data.id,
+                        payload: [
+                            this.model._getCapabilities()
+                        ],
+                        type: messageType,
+                    }, e.origin)
+
+                    log('Loaded spec from Parent')
+
+                    return resolve(new ParentAPI(e.data.id, e.origin, e.data.payload[0], this.model))
+                }
+            }
+            this.child.addEventListener('message', shake, false)
+        });
+    }
+
+    async focus() {
+        this.parent.focus();
+    }
+
+    async end() {
+        await this.then(async (parent) => {
+            await parent.emit('_close', ['closing'])
+        })
+    }
+}
+
+export const Postmate = {
+    debug: false,
+    parent: Parent,
+    child: Child
+}
