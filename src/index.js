@@ -48,7 +48,7 @@ const nextRequestId = () => ++requestId
 
 /**
  * Postmate logging function that enables/disables via config
- * @param  {Object} ...args Rest Arguments
+ * @param args
  */
 const log = (...args) => Postmate.debug && process.env.NODE_ENV !== 'production' ? console.log(...args) : null // eslint-disable-line no-console
 
@@ -71,7 +71,7 @@ const proxy = async function (key, spec, ...args) {
     return await this.emit(key, args)
 }
 
-export class Model {
+export class Actor {
     _getCapabilities() {
         let spec = {},
             proto = Object.getPrototypeOf(this)
@@ -207,7 +207,7 @@ class API {
  * @param {Object} info Information on the consumer
  */
 class ParentAPI extends API {
-    constructor(id, origin, outboundSpec, inboundModel) {
+    constructor(id, origin, outboundSpec, inboundActor) {
         super(
             id,
             origin,
@@ -217,7 +217,7 @@ class ParentAPI extends API {
             }),
             new Config({
                 frame: window,
-                actor: inboundModel,
+                actor: inboundActor,
             }),
         );
     }
@@ -227,7 +227,7 @@ class ParentAPI extends API {
  * Composes an API to be used by the child
  */
 class ChildAPI extends API {
-    constructor(id, origin, outboundFrame, outboundSpec, inboundModel) {
+    constructor(id, origin, outboundFrame, outboundSpec, inboundActor) {
         super(
             id,
             origin,
@@ -237,7 +237,7 @@ class ChildAPI extends API {
             }),
             new Config({
                 frame: window,
-                actor: inboundModel,
+                actor: inboundActor,
             }),
         );
     }
@@ -246,20 +246,20 @@ class ChildAPI extends API {
 class Channel {
     parent
     child
-    model
+    actor
     promise
 
     /**
      * Sets options related to the Parent
-     * @param {Model} model
+     * @param {Actor} actor
      * @param {Object} parent
      * @param {Object} child
      * @return {Promise}
      */
-    constructor(model, parent, child) {
+    constructor(actor, parent, child) {
         this.parent = parent
         this.child = child
-        this.model = model
+        this.actor = actor
 
         this.handleChildClosure()
         this.handleParentClosure()
@@ -296,34 +296,34 @@ class Channel {
  * The entry point of the Parent.
  * @type {Class}
  */
-class Child extends Channel {
+export class Child extends Channel {
     /**
      *
      * @param {String} url
      * @param {String} name
-     * @param {Model} model
+     * @param {Actor} actor
      * @param {string} options
-     * @returns {Postmate}
+     * @returns {Child}
      */
-    static window(url, name, model = null, options = null) {
+    static window(url, name, actor = null, options = null) {
         let frame = window.open(url, name, options)
-        return new Child(model, url, frame, frame)
+        return new Child(actor, url, frame, frame)
     }
 
     /**
      * @param {String} url
      * @param {String} name
-     * @param {Model} model
+     * @param {Actor} actor
      * @param {Function} options
      * @param {HTMLElement} container
-     * @returns {Postmate}
+     * @returns {Child}
      */
-    static iframe(url, name, model = null, options = null, container = document.body) {
+    static iframe(url, name, actor = null, options = null, container = document.body) {
         let frame = document.createElement('iframe')
         if (options) options(frame)
         frame.name = name
         container.appendChild(frame)
-        return new Child(model, url, frame, frame.contentWindow || frame.contentDocument.parentWindow)
+        return new Child(actor, url, frame, frame.contentWindow || frame.contentDocument.parentWindow)
     }
 
     frame
@@ -331,14 +331,14 @@ class Child extends Channel {
 
     /**
      * Sets options related to the Parent
-     * @param {Model} model
+     * @param {Actor} actor
      * @param {String} url
      * @param {Object} frame
      * @param {Object} child
      * @return {Promise}
      */
-    constructor(model, url, frame, child) {
-        super(model, window, child)
+    constructor(actor, url, frame, child) {
+        super(actor, window, child)
         this.frame = frame
         this.url = url
         this.promise = this.sendHandshake(url)
@@ -364,7 +364,7 @@ class Child extends Channel {
                     log('Received handshake reply from Child')
                     this.parent.removeEventListener('message', reply, false)
 
-                    return resolve(new ChildAPI(id, e.origin, this.child, e.data.payload[0], this.model))
+                    return resolve(new ChildAPI(id, e.origin, this.child, e.data.payload[0], this.actor))
                 }
             }
 
@@ -386,7 +386,7 @@ class Child extends Channel {
                         postmate: '_handshake',
                         id,
                         payload: [
-                            this.model._getCapabilities()
+                            this.actor._getCapabilities()
                         ],
                         type: messageType,
                     }, childOrigin)
@@ -442,17 +442,17 @@ class Child extends Channel {
  * @type {Class}
  */
 export class Parent extends Channel {
-    static listen(model) {
-        return new Parent(model)
+    static listen(actor) {
+        return new Parent(actor)
     }
 
     /**
-     * Initializes the child, model, parent, and responds to the Parents handshake
-     * @param {Model} model Hash of values, functions, or promises
+     * Initializes the child, actor, parent, and responds to the Parents handshake
+     * @param {Actor} actor Hash of values, functions, or promises
      * @return {Promise} The Promise that resolves when the handshake has been received
      */
-    constructor(model) {
-        super(model, window.parent || window.opener, window)
+    constructor(actor) {
+        super(actor, window.parent || window.opener, window)
         this.promise = this.sendHandshakeReply()
     }
 
@@ -477,14 +477,14 @@ export class Parent extends Channel {
                         postmate: '_handshake',
                         id: e.data.id,
                         payload: [
-                            this.model._getCapabilities()
+                            this.actor._getCapabilities()
                         ],
                         type: messageType,
                     }, e.origin)
 
                     log('Loaded spec from Parent')
 
-                    return resolve(new ParentAPI(e.data.id, e.origin, e.data.payload[0], this.model))
+                    return resolve(new ParentAPI(e.data.id, e.origin, e.data.payload[0], this.actor))
                 }
             }
             this.child.addEventListener('message', shake, false)
@@ -503,10 +503,4 @@ export class Parent extends Channel {
     async focus() {
         this.parent.focus();
     }
-}
-
-export const Postmate = {
-    debug: false,
-    parent: Parent,
-    child: Child
 }
