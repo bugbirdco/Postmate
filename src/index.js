@@ -50,7 +50,7 @@ const nextRequestId = () => ++requestId
  * Postmate logging function that enables/disables via config
  * @param args
  */
-const log = (...args) => Postmate.debug && process.env.NODE_ENV !== 'production' ? console.log(...args) : null // eslint-disable-line no-console
+const log = (...args) => process.env.NODE_ENV !== 'production' ? console.log(...args) : null // eslint-disable-line no-console
 
 /**
  * Takes a URL and returns the origin
