@@ -73,22 +73,31 @@ const proxy = async function (key, spec, ...args) {
 
 export class Model {
     _getCapabilities() {
-        return Object.getOwnPropertyNames(Object.getPrototypeOf(this))
-            // Get only the public methods
-            .filter((attribute) => {
-                switch (true) {
-                    case attribute === 'constructor':
-                    case attribute.substr(0, 1) === '_':
-                    case typeof this[attribute] !== 'function':
-                        return false
-                }
-                return true
-            })
-            // Return a spec containing the name & args length
-            .reduce((spec, key) => {
-                spec[key] = this[key].length;
-                return spec;
-            }, {})
+        let spec = {},
+            proto = Object.getPrototypeOf(this)
+
+        while (proto !== null) {
+            let keys = Object.getOwnPropertyNames(proto)
+            if (keys.includes('_getCapabilities'))
+                proto = null
+            else {
+                spec = keys.reduce((spec, key) => {
+                    switch (true) {
+                        case key === 'constructor':
+                        case key.substr(0, 1) === '_':
+                        case key in spec:
+                        case typeof this[key] !== 'function':
+                            return spec
+                    }
+
+                    spec[key] = this[key].length
+                    return spec
+                }, spec)
+                proto = Object.getPrototypeOf(proto)
+            }
+        }
+
+        return spec
     }
 }
 
@@ -234,11 +243,60 @@ class ChildAPI extends API {
     }
 }
 
+class Channel {
+    parent
+    child
+    model
+    promise
+
+    /**
+     * Sets options related to the Parent
+     * @param {Model} model
+     * @param {Object} parent
+     * @param {Object} child
+     * @return {Promise}
+     */
+    constructor(model, parent, child) {
+        this.parent = parent
+        this.child = child
+        this.model = model
+
+        this.handleChildClosure()
+        this.handleParentClosure()
+    }
+
+    async end() {
+        await this.then(async (parent) => {
+            await parent.emit('_close', ['closing'])
+        })
+    }
+
+    then(handler) {
+        return this.promise.then(handler)
+    }
+
+    catch(handler) {
+        return this.promise.catch(handler)
+    }
+
+    finally(handler) {
+        return this.promise.finally(handler)
+    }
+
+    handleChildClosure() {
+        throw new Error('Method not implemented')
+    }
+
+    handleParentClosure() {
+        throw new Error('Method not implemented')
+    }
+}
+
 /**
  * The entry point of the Parent.
  * @type {Class}
  */
-class Parent {
+class Child extends Channel {
     /**
      *
      * @param {String} url
@@ -249,7 +307,7 @@ class Parent {
      */
     static window(url, name, model = null, options = null) {
         let frame = window.open(url, name, options)
-        return new Parent(model, url, frame, frame)
+        return new Child(model, url, frame, frame)
     }
 
     /**
@@ -265,13 +323,11 @@ class Parent {
         if (options) options(frame)
         frame.name = name
         container.appendChild(frame)
-        return new Parent(model, url, frame, frame.contentWindow || frame.contentDocument.parentWindow)
+        return new Child(model, url, frame, frame.contentWindow || frame.contentDocument.parentWindow)
     }
 
-    parent
     frame
-    child
-    model
+    url
 
     /**
      * Sets options related to the Parent
@@ -282,28 +338,27 @@ class Parent {
      * @return {Promise}
      */
     constructor(model, url, frame, child) {
-        this.parent = window
+        super(model, window, child)
         this.frame = frame
-        this.child = child
-        this.model = model
-
-        return this.sendHandshake(url)
+        this.url = url
+        this.promise = this.sendHandshake(url)
     }
 
     /**
      * Begins the handshake strategy
-     * @param  {String} url The URL to send a handshake request to
-     * @return {Promise}     Promise that resolves when the handshake is complete
+     * @return {Promise} Promise that resolves when the handshake is complete
      */
-    sendHandshake(url) {
+    sendHandshake() {
         return new Promise((resolve, reject) => {
-            const childOrigin = resolveOrigin(url)
-            let attempt = 0
-            let responseInterval
-            let id = nextId()
+            const childOrigin = resolveOrigin(this.url)
+            let attempt = 0,
+                responseInterval,
+                id = nextId(),
+                watchdog
 
             const reply = (e) => {
                 if (e.data.postmate === '_handshake' && e.data.id === id && e.origin === childOrigin) {
+                    clearTimeout(watchdog)
                     clearInterval(responseInterval)
 
                     log('Received handshake reply from Child')
@@ -311,12 +366,14 @@ class Parent {
 
                     return resolve(new ChildAPI(id, e.origin, this.child, e.data.payload[0], this.model))
                 }
-
-                // Might need to remove since parent might be receiving different messages
-                // from different hosts
-                log('Invalid handshake reply')
-                return reject('Failed handshake')
             }
+
+            watchdog = setTimeout(() => {
+                this.child.removeEventListener('message', reply, false)
+
+                log('Invalid handshake reply')
+                reject('Handshake never received')
+            }, handshakeCoolDown * handshakeRequestsCount)
 
             this.parent.addEventListener('message', reply, false)
 
@@ -344,15 +401,11 @@ class Parent {
                 responseInterval = setInterval(doSend, 500)
             }
 
-            if (this.frame.attachEvent) {
-                this.frame.attachEvent('onload', loaded)
-            } else {
-                this.frame.addEventListener('load', loaded)
-            }
+            this.frame.addEventListener('load', loaded)
 
-            log('Loading frame', {url})
+            log(`Loading frame ${this.url}`)
             if (!this.frame.src) {
-                this.frame.src = url
+                this.frame.src = this.url
             }
         })
     }
@@ -361,9 +414,25 @@ class Parent {
         this.child.focus();
     }
 
-    async end() {
-        await this.then(async (parent) => {
-            await parent.emit('_close', ['closing'])
+    handleParentClosure() {
+        this.parent.addEventListener('beforeunload', () => {
+            this.child.close();
+        })
+    }
+
+    handleChildClosure() {
+        this.child.addEventListener('beforeunload', () => {
+            let attempt = 0,
+                checker = setTimeout(() => {
+                    attempt++
+                    if (this.child.document.readyState !== 'loading') {
+                        clearTimeout(checker)
+                        this.promise = this.sendHandshake().catch(false)
+                        this.handleChildClosure()
+                    } else if (attempt > handshakeRequestsCount) {
+                        clearTimeout(checker)
+                    }
+                }, handshakeCoolDown)
         })
     }
 }
@@ -372,11 +441,10 @@ class Parent {
  * The entry point of the Child
  * @type {Class}
  */
-export class Child {
-    child
-    parent
-    model
-    id
+export class Parent extends Channel {
+    static listen(model) {
+        return new Parent(model)
+    }
 
     /**
      * Initializes the child, model, parent, and responds to the Parents handshake
@@ -384,10 +452,8 @@ export class Child {
      * @return {Promise} The Promise that resolves when the handshake has been received
      */
     constructor(model) {
-        this.child = window
-        this.parent = this.child.parent || this.child.opener
-        this.model = model
-        return this.sendHandshakeReply()
+        super(model, window.parent || window.opener, window)
+        this.promise = this.sendHandshakeReply()
     }
 
     /**
@@ -396,11 +462,11 @@ export class Child {
      */
     sendHandshakeReply() {
         return new Promise((resolve, reject) => {
-            const watchdog = setTimeout(() => {
+            let watchdog = setTimeout(() => {
                 this.child.removeEventListener('message', shake, false)
                 reject('Handshake never received')
             }, handshakeCoolDown * handshakeRequestsCount)
-            const shake = (e) => {
+            let shake = (e) => {
                 if (e.data.postmate === '_handshake') {
                     log('Received handshake from Parent')
                     clearTimeout(watchdog)
@@ -425,14 +491,17 @@ export class Child {
         });
     }
 
-    async focus() {
-        this.parent.focus();
+    handleParentClosure() {
+        this.parent.addEventListener('beforeunload', () => {
+            this.child.close();
+        })
     }
 
-    async end() {
-        await this.then(async (parent) => {
-            await parent.emit('_close', ['closing'])
-        })
+    handleChildClosure() {
+    }
+
+    async focus() {
+        this.parent.focus();
     }
 }
 
