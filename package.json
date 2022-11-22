@@ -1,20 +1,12 @@
 {
   "name": "@bugbirdco/postmate",
   "version": "2.0.0",
-  "description": "A powerful, simple, promise-based postMessage library",
+  "description": "A powerful, simple, promise-based postMessage library, based on dollarshaveclub/postmate",
   "main": "src/index.js",
   "files": [
     "build",
     "src"
   ],
-  "devDependencies": {
-  },
-  "scripts": {
-  },
-  "jest": {
-  },
-  "repository": {
-  },
   "keywords": [
     "postMessage",
     "secure",
@@ -24,6 +16,9 @@
     "pci",
     "security"
   ],
-  "author": "Jacob Kelley <jakie8@gmail.com>",
+  "author": {
+    "email": "jordan@bugbird.co",
+    "name": "Jordan Bugbird"
+  },
   "license": "MIT"
 }

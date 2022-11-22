@@ -1,11 +1,29 @@
-node_modules
+#~ global/JetBrains ~#
+.idea
+
+#~ main/Node ~#
+
+# Logs
+logs
 *.log
-ssl/*.pem
-.DS_Store
-tests/.DS_Store
-.nyc_output/
-coverage
-coverage/
-coverage.lcov
-coverage_*/
-.idea/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Yarn Integrity file
+.yarn-integrity
