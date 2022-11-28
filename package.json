@@ -3,10 +3,6 @@
   "version": "2.0.0",
   "description": "A powerful, simple, promise-based postMessage library, based on dollarshaveclub/postmate",
   "main": "src/index.js",
-  "files": [
-    "build",
-    "src"
-  ],
   "keywords": [
     "postMessage",
     "secure",
